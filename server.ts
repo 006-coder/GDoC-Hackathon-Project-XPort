@@ -11,7 +11,7 @@ app.use(express.json({ limit: '50mb' }));
 
 const PORT = 3000;
 
-// Initialize Supabase client supporting standard and NEXT_PUBLIC_ env vars
+// Initialize Supabase client strictly reading SUPABASE_URL and SUPABASE_ANON_KEY (with NEXT_PUBLIC_ fallbacks)
 const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '';
 const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
 const supabase = (supabaseUrl && supabaseAnonKey) ? createClient(supabaseUrl, supabaseAnonKey) : null;
@@ -19,7 +19,7 @@ const supabase = (supabaseUrl && supabaseAnonKey) ? createClient(supabaseUrl, su
 if (!supabase) {
   console.warn('Supabase credentials not found. Falling back to in-memory audit store.');
 } else {
-  console.log('Supabase client initialized successfully with URL:', supabaseUrl);
+  console.log('Supabase client initialized successfully.');
 }
 
 // Initialize Gemini AI
@@ -36,9 +36,8 @@ const ai = new GoogleGenAI({
 // In-memory fallback stores
 const memoryUploads = new Map<string, any>();
 const memoryExports = new Map<string, any>();
-const memoryCheckpoints = new Map<string, any>();
 
-// API Routes: Upload & user_uploads insert
+// API Routes: Upload
 app.post('/api/upload', async (req, res) => {
   try {
     const { fileName, fileSize, fileType, content, rawMetadata } = req.body;
@@ -65,13 +64,12 @@ app.post('/api/upload', async (req, res) => {
             upsert: true
           });
         }
-
-        const { data, error } = await supabase.from('user_uploads').insert([dbRecord]).select();
-        if (error) {
-          console.error('Supabase user_uploads insert error:', error.message);
+        const { error: insertErr } = await supabase.from('user_uploads').insert([dbRecord]).select();
+        if (insertErr) {
+          console.error('Supabase user_uploads insert error:', insertErr.message);
           memoryUploads.set(uploadId, dbRecord);
         } else {
-          console.log('Supabase user_uploads insert success:', data);
+          console.log('Supabase user_uploads insert success:', uploadId);
         }
       } catch (sbErr: any) {
         console.error('Supabase upload exception:', sbErr.message);
@@ -83,12 +81,11 @@ app.post('/api/upload', async (req, res) => {
 
     res.json({ success: true, uploadId, record: dbRecord });
   } catch (err: any) {
-    console.error('Upload endpoint error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// API Routes: Synthesize & generated_exports + export_checkpoints inserts
+// API Routes: Synthesize with real file content parsing
 app.post('/api/synthesize', async (req, res) => {
   try {
     const {
@@ -103,10 +100,10 @@ app.post('/api/synthesize', async (req, res) => {
       nullRate = 0.02,
       outlierRate = 0.01,
       runTstr = true,
-      schemaPrompt = ''
+      fileContent = '' // Real parsed file content from Screen 2
     } = req.body;
 
-    let seed = randomSeed;
+    let seed = Number(randomSeed) || 42;
     function seededRandom() {
       seed = (seed * 9301 + 49297) % 233280;
       return seed / 233280;
@@ -123,17 +120,20 @@ app.post('/api/synthesize', async (req, res) => {
       jsDivergence: 0.012
     };
 
+    // Pass fileContent context to Gemini AI API
     if (apiKey && apiKey !== 'MY_GEMINI_XPORT_API_KEY' && apiKey !== 'MY_GEMINI_API_KEY' && apiKey !== 'dummy_key') {
       try {
-        const prompt = `Generate realistic synthetic dataset for format '${format}' (${subFormat}) with ${rowCount} rows, locale ${locale}, currency ${currency}, seed ${randomSeed}. Return JSON.`;
+        const prompt = fileContent 
+          ? `Analyze this exact user dataset/schema: ${fileContent.substring(0, 4000)}. Synthesize realistic, privacy-safe mock data matching the exact columns, types, and domain of THIS input file. Format: '${format}' (${subFormat}), rowCount: ${rowCount}, seed: ${seed}. Return JSON.`
+          : `Generate synthetic dataset for format '${format}' (${subFormat}) with ${rowCount} rows, locale ${locale}, currency ${currency}, seed ${seed}. Return JSON.`;
         
         const response = await ai.models.generateContent({
           model: 'gemini-3.8-flash',
           contents: prompt,
           config: {
             responseMimeType: 'application/json',
-            seed: Number(randomSeed),
-            systemInstruction: 'You are an expert enterprise synthetic data generator. Produce clean, realistic records in strict JSON format.',
+            seed: Number(seed),
+            systemInstruction: 'You are an expert enterprise synthetic data engine. Analyze the provided user file schema and synthesize matching records in strict JSON format.',
             tools: [{ googleSearch: {} }]
           }
         });
@@ -160,7 +160,7 @@ app.post('/api/synthesize', async (req, res) => {
 
         const rows = [];
         for (let i = 1; i <= Math.min(rowCount, 500); i++) {
-          const id = `USR_${98200 + i}`;
+          const id = `USR_${(seed % 90000) + 10000 + i}`;
           const name = sampleNames[Math.floor(seededRandom() * sampleNames.length)] + ` (${i})`;
           const revenue = Math.round(seededRandom() * 950000 + 15000);
           const status = statuses[Math.floor(seededRandom() * statuses.length)];
@@ -169,7 +169,7 @@ app.post('/api/synthesize', async (req, res) => {
           rows.push({
             CUSTOMER_ID: id,
             CLIENT_NAME: name,
-            ANNUAL_REVENUE: `$${revenue.toLocaleString()}`,
+            ANNUAL_REVENUE: currency === 'EUR' ? `€${revenue.toLocaleString()}` : currency === 'GBP' ? `£${revenue.toLocaleString()}` : `$${revenue.toLocaleString()}`,
             STATUS: status,
             REGION: region,
             CHURN_RISK: `${churn} (${churn < 0.2 ? 'Low' : churn < 0.6 ? 'Medium' : 'High'})`
@@ -178,9 +178,9 @@ app.post('/api/synthesize', async (req, res) => {
         generatedData = { columns, rows };
       } else if (format === 'relational' || format === 'sql') {
         let sql = `-- ========================================================\n`;
-        sql += `-- XPORT Relational Engine v2.4 - Full SQL DDL & INSERT Dump\n`;
-        sql += `-- Seed: ${randomSeed} | Generated: ${new Date().toISOString()}\n`;
-        sql += `-- Referential Integrity: STRICT (0 Orphan Records)\n`;
+        sql += `-- XPORT Relational Engine - Interactive Multi-Table Schema\n`;
+        sql += `-- Seed: ${seed} | Generated: ${new Date().toISOString()}\n`;
+        sql += `-- Tables: customers, orders, order_items (FK Integrity Enforced)\n`;
         sql += `-- ========================================================\n\n`;
         
         sql += `BEGIN;\n\n`;
@@ -189,38 +189,65 @@ app.post('/api/synthesize', async (req, res) => {
         sql += `DROP TABLE IF EXISTS customers CASCADE;\n\n`;
 
         sql += `CREATE TABLE customers (\n`;
-        sql += `  customer_id VARCHAR(32) PRIMARY KEY,\n`;
+        sql += `  customer_id VARCHAR(32) PRIMARY KEY, -- PK\n`;
         sql += `  client_name VARCHAR(128) NOT NULL,\n`;
         sql += `  region VARCHAR(32) NOT NULL,\n`;
         sql += `  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\n);\n\n`;
 
         sql += `CREATE TABLE orders (\n`;
-        sql += `  order_id SERIAL PRIMARY KEY,\n`;
-        sql += `  customer_id VARCHAR(32) NOT NULL REFERENCES customers(customer_id) ON DELETE CASCADE,\n`;
+        sql += `  order_id SERIAL PRIMARY KEY, -- PK\n`;
+        sql += `  customer_id VARCHAR(32) NOT NULL REFERENCES customers(customer_id) ON DELETE CASCADE, -- FK -> customers(customer_id)\n`;
         sql += `  order_total NUMERIC(12, 2) NOT NULL,\n`;
         sql += `  status VARCHAR(32) NOT NULL\n);\n\n`;
 
-        const sampleCusts = [
-          ['USR_98210', 'Acme Dynamics LLC', 'NA-EAST'],
-          ['USR_98211', 'Vortex HyperScale', 'EU-CENTRAL'],
-          ['USR_98212', 'Solis Biotech Lab', 'APAC-SOUTH'],
-          ['USR_98213', 'Apex Logistics Corp', 'NA-WEST'],
-          ['USR_98214', 'Kestrel FinTech IO', 'LATAM-BR']
+        sql += `CREATE TABLE order_items (\n`;
+        sql += `  item_id SERIAL PRIMARY KEY, -- PK\n`;
+        sql += `  order_id INTEGER NOT NULL REFERENCES orders(order_id) ON DELETE CASCADE, -- FK -> orders(order_id)\n`;
+        sql += `  product_sku VARCHAR(64) NOT NULL,\n`;
+        sql += `  unit_price NUMERIC(10, 2) NOT NULL,\n`;
+        sql += `  quantity INTEGER NOT NULL\n);\n\n`;
+
+        // Insert sample tables data for tabbed preview
+        const customersTable = [
+          { customer_id: 'USR_98210', client_name: 'Acme Dynamics LLC', region: 'NA-EAST' },
+          { customer_id: 'USR_98211', client_name: 'Vortex HyperScale', region: 'EU-CENTRAL' },
+          { customer_id: 'USR_98212', client_name: 'Solis Biotech Lab', region: 'APAC-SOUTH' }
         ];
 
-        sampleCusts.forEach(c => {
-          sql += `INSERT INTO customers (customer_id, client_name, region) VALUES ('${c[0]}', '${c[1]}', '${c[2]}');\n`;
+        const ordersTable = [
+          { order_id: 1001, customer_id: 'USR_98210', order_total: 48200.00, status: 'Completed' },
+          { order_id: 1002, customer_id: 'USR_98211', order_total: 125000.00, status: 'Completed' },
+          { order_id: 1003, customer_id: 'USR_98212', customer_id_fk: 'USR_98212', order_total: 19400.00, status: 'Processing' }
+        ];
+
+        const orderItemsTable = [
+          { item_id: 1, order_id: 1001, product_sku: 'SKU-ENT-01', unit_price: 24100.00, quantity: 2 },
+          { item_id: 2, order_id: 1002, product_sku: 'SKU-CLD-09', unit_price: 62500.00, quantity: 2 },
+          { item_id: 3, order_id: 1003, product_sku: 'SKU-BIO-04', unit_price: 9700.00, quantity: 2 }
+        ];
+
+        customersTable.forEach(c => {
+          sql += `INSERT INTO customers (customer_id, client_name, region) VALUES ('${c.customer_id}', '${c.client_name}', '${c.region}');\n`;
         });
 
-        let orderIdCounter = 1001;
-        sampleCusts.forEach(c => {
-          const total = Math.round(seededRandom() * 50000 + 5000);
-          sql += `INSERT INTO orders (order_id, customer_id, order_total, status) VALUES (${orderIdCounter}, '${c[0]}', ${total}.00, 'Completed');\n`;
-          orderIdCounter++;
+        ordersTable.forEach(o => {
+          sql += `INSERT INTO orders (order_id, customer_id, order_total, status) VALUES (${o.order_id}, '${o.customer_id}', ${o.order_total}, '${o.status}');\n`;
+        });
+
+        orderItemsTable.forEach(oi => {
+          sql += `INSERT INTO order_items (item_id, order_id, product_sku, unit_price, quantity) VALUES (${oi.item_id}, ${oi.order_id}, '${oi.product_sku}', ${oi.unit_price}, ${oi.quantity});\n`;
         });
 
         sql += `\nCOMMIT;\n`;
-        generatedData = { sqlDump: sql };
+
+        generatedData = {
+          sqlDump: sql,
+          tables: {
+            customers: customersTable,
+            orders: ordersTable,
+            order_items: orderItemsTable
+          }
+        };
       } else if (format === 'ml') {
         const trainRows = [];
         const testRows = [];
@@ -228,13 +255,13 @@ app.post('/api/synthesize', async (req, res) => {
         const splitIndex = Math.floor(totalRows * 0.8);
 
         for (let i = 1; i <= totalRows; i++) {
-          const revenue = Math.round(seededRandom() * 900000 + 20000);
+          const revenue = Math.round(seededRandom() * 950000 + 10000);
           const tenureMonths = Math.floor(seededRandom() * 60 + 1);
           const score = Number((seededRandom() * 0.95).toFixed(2));
           const label = score < 0.3 ? 'Low' : score < 0.7 ? 'Medium' : 'High';
 
           const record = {
-            id: `rec_${i}`,
+            id: `rec_${seed}_${i}`,
             features: {
               annual_revenue: revenue,
               tenure_months: tenureMonths,
@@ -264,9 +291,9 @@ app.post('/api/synthesize', async (req, res) => {
       } else {
         generatedData = {
           documentType: subFormat.toUpperCase(),
-          title: `Synthetic Enterprise ${subFormat.toUpperCase()} Financial Statement`,
+          title: `Synthetic Enterprise ${subFormat.toUpperCase()} Financial Statement (Seed: ${seed})`,
           generatedAt: new Date().toISOString(),
-          content: `Synthesized document (${subFormat.toUpperCase()}) under seed ${randomSeed} with locale ${locale}. All PII has been masked in accordance with GDPR/HIPAA protocols.`
+          content: `Synthesized document variation under random seed ${seed} with locale ${locale}. All PII has been scrubbed.`
         };
       }
     }
@@ -289,7 +316,6 @@ app.post('/api/synthesize', async (req, res) => {
       };
     }
 
-    // Supabase DB Inserts for generated_exports and export_checkpoints
     const exportId = 'exp_' + Math.random().toString(36).substring(2, 9);
     const exportRecord = {
       id: exportId,
@@ -297,7 +323,7 @@ app.post('/api/synthesize', async (req, res) => {
       format_type: format,
       sub_format: subFormat,
       row_count: rowCount,
-      random_seed: randomSeed,
+      random_seed: seed,
       tstr_score: tstrScore,
       output_url: `exports/${Date.now()}_export.${format === 'relational' ? 'sql' : format === 'ml' ? 'jsonl' : subFormat}`,
       created_at: new Date().toISOString()
@@ -308,7 +334,7 @@ app.post('/api/synthesize', async (req, res) => {
       upload_id: uploadId || null,
       format,
       sub_format: subFormat,
-      transformation_rules: { rowCount, randomSeed, locale, currency, privacyRules, nullRate, outlierRate },
+      transformation_rules: { rowCount, randomSeed: seed, locale, currency, privacyRules, nullRate, outlierRate },
       tstr_score: tstrScore,
       created_at: new Date().toISOString()
     };
@@ -320,19 +346,14 @@ app.post('/api/synthesize', async (req, res) => {
         
         await supabase.storage.from('generated-exports').upload(exportFilePath, Buffer.from(fileString, 'utf-8'), { upsert: true });
         
-        const { error: insertExpErr } = await supabase.from('generated_exports').insert([exportRecord]).select();
-        if (insertExpErr) console.error('Supabase generated_exports insert error:', insertExpErr.message);
-        else console.log('Supabase generated_exports insert success');
+        const { error: expErr } = await supabase.from('generated_exports').insert([exportRecord]).select();
+        if (expErr) console.error('Supabase generated_exports insert error:', expErr.message);
 
-        const { error: insertChkErr } = await supabase.from('export_checkpoints').insert([checkpointRecord]).select();
-        if (insertChkErr) console.error('Supabase export_checkpoints insert error:', insertChkErr.message);
-        else console.log('Supabase export_checkpoints insert success');
-      } catch (sbExportErr: any) {
-        console.error('Supabase export batch exception:', sbExportErr.message);
-        memoryExports.set(exportId, exportRecord);
+        const { error: chkErr } = await supabase.from('export_checkpoints').insert([checkpointRecord]).select();
+        if (chkErr) console.error('Supabase export_checkpoints insert error:', chkErr.message);
+      } catch (sbErr: any) {
+        console.error('Supabase persistence batch error:', sbErr.message);
       }
-    } else {
-      memoryExports.set(exportId, exportRecord);
     }
 
     res.json({
@@ -344,7 +365,6 @@ app.post('/api/synthesize', async (req, res) => {
       data: generatedData
     });
   } catch (err: any) {
-    console.error('Synthesis endpoint error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
