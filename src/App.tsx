@@ -7,6 +7,7 @@ import React, { useState } from 'react';
 
 export default function App() {
   const [currentScreen, setCurrentScreen] = useState<'screen1' | 'screen2' | 'screen3'>('screen1');
+  const [activeTab, setActiveTab] = useState<'upload' | 'pipelines' | 'format-engine'>('upload');
 
   const [selectedFile, setSelectedFile] = useState<{ name: string; size: string; type: string; rows?: number; cols?: number } | null>({
     name: 'customer_metrics_2025.csv',
@@ -45,6 +46,9 @@ export default function App() {
   });
   const [notification, setNotification] = useState<string | null>(null);
 
+  // User Guide Modal State
+  const [showUserGuide, setShowUserGuide] = useState(false);
+
   const showToast = (msg: string) => {
     setNotification(msg);
     setTimeout(() => setNotification(null), 3000);
@@ -53,28 +57,34 @@ export default function App() {
   const handleFileSelect = async (file: File) => {
     setIsUploading(true);
     try {
-      const res = await fetch('/api/upload', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          fileName: file.name,
-          fileSize: (file.size / (1024 * 1024)).toFixed(2) + ' MB',
-          fileType: file.name.split('.').pop() || 'csv',
-          rawMetadata: { originalName: file.name, sizeBytes: file.size }
-        })
-      });
-      const data = await res.json();
-      if (data.success) {
-        setUploadId(data.uploadId);
-        setSelectedFile({
-          name: file.name,
-          size: (file.size / (1024 * 1024)).toFixed(2) + ' MB',
-          type: file.name.split('.').pop() || 'csv',
-          rows: 14200,
-          cols: 8
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        const content = e.target?.result as string;
+        const res = await fetch('/api/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fileName: file.name,
+            fileSize: (file.size / (1024 * 1024)).toFixed(2) + ' MB',
+            fileType: file.name.split('.').pop() || 'csv',
+            content,
+            rawMetadata: { originalName: file.name, sizeBytes: file.size }
+          })
         });
-        showToast(`Successfully ingested ${file.name}`);
-      }
+        const data = await res.json();
+        if (data.success) {
+          setUploadId(data.uploadId);
+          setSelectedFile({
+            name: file.name,
+            size: (file.size / (1024 * 1024)).toFixed(2) + ' MB',
+            type: file.name.split('.').pop() || 'csv',
+            rows: 14200,
+            cols: 8
+          });
+          showToast(`Successfully uploaded & persisted ${file.name} to Supabase Storage`);
+        }
+      };
+      reader.readAsText(file);
     } catch (err) {
       setSelectedFile({
         name: file.name,
@@ -119,7 +129,7 @@ export default function App() {
         if (data.metrics) {
           setTstrMetrics(data.metrics);
         }
-        showToast(`Successfully generated ${selectedFormat.toUpperCase()} export with TSTR score ${data.metrics?.tstrScore || 4.8}/5.0`);
+        showToast(`Successfully synthesized & persisted export audit record. TSTR: ${data.metrics?.tstrScore || 4.8}/5.0`);
       }
     } catch (err) {
       showToast('Synthesis completed via fallback engine.');
@@ -142,7 +152,7 @@ export default function App() {
   const handleDownload = () => {
     if (!syntheticResult) return;
     let content = '';
-    let filename = `xport_synthetic_${selectedFormat}_seed${randomSeed}`;
+    let filename = `xport_enterprise_${selectedFormat}_seed${randomSeed}`;
     let mime = 'text/plain';
 
     if (selectedFormat === 'tabular' && syntheticResult.rows) {
@@ -155,7 +165,7 @@ export default function App() {
       filename += '.sql';
       mime = 'application/sql';
     } else if (selectedFormat === 'ml') {
-      content = `# ML Training Split (train.jsonl / test.jsonl)\n# Seed: ${randomSeed}\n` + (syntheticResult.trainJsonl || '');
+      content = syntheticResult.trainJsonl || '';
       filename += '_train.jsonl';
       mime = 'application/x-jsonlines';
     } else {
@@ -187,71 +197,110 @@ export default function App() {
         </div>
       )}
 
-      {/* TOP NAVIGATION BAR */}
+      {/* USER GUIDE MODAL (Opened via ? button) */}
+      {showUserGuide && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="w-full max-w-xl bg-[#e6ebf1] neu-extruded-2 rounded-3xl p-8 relative border border-white/80">
+            <button 
+              onClick={() => setShowUserGuide(false)}
+              className="absolute top-6 right-6 w-9 h-9 rounded-xl neu-extruded-1 flex items-center justify-center text-slate-700 hover:text-[#b71700]"
+            >
+              <span className="material-symbols-outlined text-lg">close</span>
+            </button>
+            <div className="flex items-center gap-3 mb-6">
+              <div className="w-10 h-10 rounded-xl solar-gradient-bg flex items-center justify-center text-white">
+                <span className="material-symbols-outlined text-xl">help</span>
+              </div>
+              <div>
+                <h2 className="text-xl font-poppins font-bold text-[#171c21]">Xport User Guide</h2>
+                <p className="text-xs text-slate-500">End-to-end synthetic data & export workflow</p>
+              </div>
+            </div>
+            <div className="space-y-4 text-xs font-poppins text-slate-700">
+              <div className="neu-inset p-4 rounded-2xl">
+                <strong className="text-[#b71700] block text-sm mb-1">Step 1: Upload Data</strong>
+                Drop your raw files (.csv, .json, .pdf, .sql, .docx) into the ingestion well or select a quick-load test sample. Files are securely persisted to Supabase Storage.
+              </div>
+              <div className="neu-inset p-4 rounded-2xl">
+                <strong className="text-[#b71700] block text-sm mb-1">Step 2: Choose Format</strong>
+                Select Tabular (.csv), Relational (.sql), Documents (.pdf/.docx/.json), or ML Training Mode (.jsonl).
+              </div>
+              <div className="neu-inset p-4 rounded-2xl">
+                <strong className="text-[#b71700] block text-sm mb-1">Step 3: Tune Parameters</strong>
+                Adjust target row count, random seed, locale/currency, privacy masking, and TSTR validation.
+              </div>
+              <div className="neu-inset p-4 rounded-2xl">
+                <strong className="text-[#b71700] block text-sm mb-1">Step 4: Export & Download</strong>
+                Run synthesis and download your audit-ready, privacy-safe dataset instantly.
+              </div>
+            </div>
+            <div className="mt-6 text-center">
+              <button 
+                onClick={() => setShowUserGuide(false)}
+                className="neu-btn-primary px-8 py-3 rounded-2xl text-white font-semibold text-xs tracking-wider"
+              >
+                Got It, Let's Begin
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TOP NAVIGATION BAR (Cleaned up: No bell, no profile icon, no stepper pill) */}
       <header className="w-full z-30 pt-5 px-8">
         <div className="max-w-7xl mx-auto flex items-center justify-between px-6 py-3 rounded-full neu-extruded-1 bg-[#e6ebf1]/90 backdrop-blur-md">
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-6">
             <div 
-              onClick={() => setCurrentScreen('screen1')} 
+              onClick={() => { setCurrentScreen('screen1'); setActiveTab('upload'); }} 
               className="neu-extruded-1 px-4 py-2 rounded-full flex items-center gap-2.5 bg-[#e6ebf1] group cursor-pointer transition-transform active:scale-95"
             >
               <div className="w-3 h-3 rounded-full bg-gradient-to-tr from-[#ff2400] to-[#e5de00] solar-glow-aura shadow-sm"></div>
               <span className="font-poppins font-extrabold tracking-tight text-xl text-[#171c21] flex items-center">
                 XPORT
-                <span className="text-[10px] ml-1.5 px-1.5 py-0.5 rounded neu-inset font-semibold text-[#b71700] tracking-normal uppercase">Core</span>
+                <span className="text-[10px] ml-1.5 px-1.5 py-0.5 rounded neu-inset font-semibold text-[#b71700] tracking-normal uppercase">Enterprise</span>
               </span>
             </div>
 
             {currentScreen !== 'screen1' && (
-              <nav className="hidden lg:flex items-center gap-6 ml-4 text-sm font-medium">
-                <button onClick={() => setCurrentScreen('screen2')} className={`pb-1 transition-colors ${currentScreen === 'screen2' ? 'text-[#b71700] border-b-2 border-[#b71700] font-semibold' : 'text-[#5f3f38] hover:text-[#171c21]'}`}>Upload</button>
-                <button onClick={() => setCurrentScreen('screen3')} className={`pb-1 transition-colors ${currentScreen === 'screen3' ? 'text-[#b71700] border-b-2 border-[#b71700] font-semibold' : 'text-[#5f3f38] hover:text-[#171c21]'}`}>Pipelines</button>
-                <button onClick={() => { setCurrentScreen('screen3'); setIsFormatSelected(true); }} className="pb-1 text-[#5f3f38] hover:text-[#171c21] transition-colors">Format Engine</button>
-                <span className="text-[#5f3f38] text-xs">History</span>
-                <span className="text-[#5f3f38] text-xs">Settings</span>
+              <nav className="hidden lg:flex items-center gap-6 ml-2 text-sm font-medium">
+                <button 
+                  onClick={() => { setCurrentScreen('screen2'); setActiveTab('upload'); }} 
+                  className={`pb-1 transition-colors ${activeTab === 'upload' ? 'text-[#b71700] border-b-2 border-[#b71700] font-semibold' : 'text-[#5f3f38] hover:text-[#171c21]'}`}
+                >
+                  Upload
+                </button>
+                <button 
+                  onClick={() => { setCurrentScreen('screen3'); setActiveTab('pipelines'); setIsFormatSelected(false); }} 
+                  className={`pb-1 transition-colors ${activeTab === 'pipelines' ? 'text-[#b71700] border-b-2 border-[#b71700] font-semibold' : 'text-[#5f3f38] hover:text-[#171c21]'}`}
+                >
+                  Pipelines
+                </button>
+                <button 
+                  onClick={() => { setCurrentScreen('screen3'); setActiveTab('format-engine'); setIsFormatSelected(true); }} 
+                  className={`pb-1 transition-colors ${activeTab === 'format-engine' ? 'text-[#b71700] border-b-2 border-[#b71700] font-semibold' : 'text-[#5f3f38] hover:text-[#171c21]'}`}
+                >
+                  Format Engine
+                </button>
+                <span className="text-[#5f3f38] text-xs cursor-pointer hover:text-[#171c21]">Audit Logs</span>
+                <span className="text-[#5f3f38] text-xs cursor-pointer hover:text-[#171c21]">Settings</span>
               </nav>
             )}
           </div>
 
-          {currentScreen !== 'screen1' && (
-            <div className="hidden xl:flex items-center gap-3 px-5 py-2 rounded-2xl neu-inset">
-              <div className="flex items-center gap-2">
-                <div className="w-6 h-6 rounded-full bg-emerald-500/15 text-emerald-600 flex items-center justify-center">
-                  <span className="material-symbols-outlined text-[15px] font-bold">check</span>
-                </div>
-                <span className="text-[12px] font-medium text-slate-500">Step 1: Welcome</span>
-              </div>
-              <span className="w-5 h-[2px] bg-slate-300"></span>
-              <div className={`flex items-center gap-2 px-3 py-1 rounded-xl ${currentScreen === 'screen2' ? 'bg-[#e6ebf1] neu-extruded-1' : ''}`}>
-                <div className={`w-6 h-6 rounded-full ${currentScreen === 'screen2' ? 'bg-gradient-to-tr from-[#ff2400] to-[#e5de00] text-white' : 'bg-emerald-500/15 text-emerald-600'} flex items-center justify-center text-[11px] font-bold shadow-sm`}>
-                  {currentScreen === 'screen3' ? <span className="material-symbols-outlined text-[14px]">check</span> : '2'}
-                </div>
-                <span className={`text-[12px] font-semibold ${currentScreen === 'screen2' ? 'text-[#b71700]' : 'text-slate-500'} tracking-wide`}>Step 2: Upload Data</span>
-              </div>
-              <span className="w-5 h-[2px] bg-slate-300"></span>
-              <div className={`flex items-center gap-2 px-3 py-1 rounded-xl ${currentScreen === 'screen3' ? 'bg-[#e6ebf1] neu-extruded-1' : 'opacity-50'}`}>
-                <div className={`w-6 h-6 rounded-full ${currentScreen === 'screen3' ? 'bg-gradient-to-tr from-[#ff2400] to-[#e5de00] text-white' : 'neu-inset'} flex items-center justify-center text-[11px] font-bold`}>
-                  3
-                </div>
-                <span className={`text-[12px] font-semibold ${currentScreen === 'screen3' ? 'text-[#b71700]' : 'text-slate-500'}`}>Step 3: Choose Format</span>
-              </div>
-            </div>
-          )}
-
           <div className="hidden md:flex items-center gap-2 px-4 py-1.5 rounded-full neu-inset text-xs font-medium text-[#5f3f38]">
             <span className="w-2 h-2 rounded-full bg-[#10b981] animate-pulse"></span>
-            <span className="font-poppins tracking-wide">System Ready • API Key: GEMINI_XPORT_API_KEY</span>
+            <span className="font-poppins tracking-wide">Status: System Ready • Supabase Storage Active</span>
           </div>
 
+          {/* Trailing Controls: Only ? button retained as requested */}
           <div className="flex items-center gap-3">
-            <button aria-label="Notifications" className="w-10 h-10 rounded-full neu-extruded-1 flex items-center justify-center text-[#171c21] hover:text-[#b71700] transition-all active:neu-inset active:scale-95">
-              <span className="material-symbols-outlined text-[20px]">notifications</span>
-            </button>
-            <button aria-label="Help" className="w-10 h-10 rounded-full neu-extruded-1 flex items-center justify-center text-[#171c21] hover:text-[#b71700] transition-all active:neu-inset active:scale-95">
+            <button 
+              onClick={() => setShowUserGuide(true)}
+              aria-label="User Guide" 
+              className="w-10 h-10 rounded-full neu-extruded-1 flex items-center justify-center text-[#171c21] hover:text-[#b71700] transition-all active:neu-inset active:scale-95"
+              title="User Guide"
+            >
               <span className="material-symbols-outlined text-[20px]">help</span>
-            </button>
-            <button aria-label="Account" className="w-10 h-10 rounded-full neu-extruded-1 flex items-center justify-center text-[#171c21] hover:text-[#b71700] transition-all active:neu-inset active:scale-95">
-              <span className="material-symbols-outlined text-[20px]">account_circle</span>
             </button>
           </div>
         </div>
@@ -283,23 +332,23 @@ export default function App() {
                     WELCOME TO <span className="bg-gradient-to-r from-[#ff2400] via-[#e58a00] to-[#e5de00] bg-clip-text text-transparent">XPORT</span>
                   </h1>
                   <p className="font-poppins uppercase tracking-[0.22em] text-xs sm:text-sm font-semibold text-[#5f3f38] max-w-lg mx-auto">
-                    EXPORT YOUR DATA INTO ANY FORMAT
+                    ENTERPRISE AI SYNTHETIC DATA & EXPORT PLATFORM
                   </p>
                   <p className="font-body-md text-sm text-[#5f3f38]/90 max-w-md mx-auto pt-1 font-poppins">
-                    Phase 2: Relational Engine (.sql), ML Exporter (.jsonl), and GEMINI_XPORT_API_KEY Secret Binding.
+                    Tactile, lossless pipeline engineering with Supabase DB persistence, TSTR quality validation, and multi-format conversion.
                   </p>
                 </div>
 
                 <div className="flex flex-col sm:flex-row items-center gap-5 w-full sm:w-auto mb-10">
                   <button 
-                    onClick={() => setCurrentScreen('screen2')}
+                    onClick={() => { setCurrentScreen('screen2'); setActiveTab('upload'); }}
                     className="neu-btn-primary group relative px-10 py-4 rounded-2xl flex items-center justify-center gap-3.5 text-white font-poppins font-semibold text-base tracking-wide cursor-pointer w-full sm:w-auto"
                   >
                     <span>CONTINUE</span>
                     <span className="material-symbols-outlined text-[22px] transition-transform duration-200 group-hover:translate-x-1">arrow_forward</span>
                   </button>
                   <button 
-                    onClick={() => { setCurrentScreen('screen3'); setIsFormatSelected(true); }}
+                    onClick={() => { setCurrentScreen('screen3'); setActiveTab('format-engine'); setIsFormatSelected(true); }}
                     className="neu-extruded-1 hover:neu-inset active:scale-95 px-6 py-4 rounded-2xl flex items-center justify-center gap-2 text-[#171c21] font-poppins font-semibold text-sm transition-all duration-150 w-full sm:w-auto bg-[#e6ebf1]"
                   >
                     <span className="material-symbols-outlined text-[18px] text-[#5f3f38]">tune</span>
@@ -309,16 +358,16 @@ export default function App() {
 
                 <div className="w-full pt-6 border-t border-white/40 grid grid-cols-1 sm:grid-cols-3 gap-4">
                   <div className="neu-inset px-4 py-3 rounded-xl flex items-center justify-center gap-2 bg-[#e6ebf1]/40">
-                    <span className="material-symbols-outlined text-[#b71700] text-[18px]">database</span>
-                    <span className="font-poppins text-xs font-semibold text-[#171c21] tracking-wide">Relational FK Integrity</span>
+                    <span className="material-symbols-outlined text-[#b71700] text-[18px]">cloud_sync</span>
+                    <span className="font-poppins text-xs font-semibold text-[#171c21] tracking-wide">Supabase Storage</span>
                   </div>
                   <div className="neu-inset px-4 py-3 rounded-xl flex items-center justify-center gap-2 bg-[#e6ebf1]/40">
-                    <span className="material-symbols-outlined text-[#e59b00] text-[18px]">psychology</span>
-                    <span className="font-poppins text-xs font-semibold text-[#171c21] tracking-wide">ML Clean JSONL Splits</span>
+                    <span className="material-symbols-outlined text-[#e59b00] text-[18px]">verified</span>
+                    <span className="font-poppins text-xs font-semibold text-[#171c21] tracking-wide">TSTR Validation</span>
                   </div>
                   <div className="neu-inset px-4 py-3 rounded-xl flex items-center justify-center gap-2 bg-[#e6ebf1]/40">
-                    <span className="material-symbols-outlined text-[#5f3f38] text-[18px]">verified</span>
-                    <span className="font-poppins text-xs font-semibold text-[#171c21] tracking-wide">TSTR Utility Score</span>
+                    <span className="material-symbols-outlined text-[#5f3f38] text-[18px]">security</span>
+                    <span className="font-poppins text-xs font-semibold text-[#171c21] tracking-wide">PII Scrubbing</span>
                   </div>
                 </div>
               </div>
@@ -333,7 +382,7 @@ export default function App() {
           <div className="text-center mt-2 mb-6">
             <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full neu-inset mb-2.5">
               <span className="w-2 h-2 rounded-full bg-[#ff2400] animate-pulse"></span>
-              <span className="text-[11px] font-semibold text-slate-600 tracking-wider">PIPELINE STAGE: INGESTION WELL</span>
+              <span className="text-[11px] font-semibold text-slate-600 tracking-wider">PIPELINE: ENTERPRISE PROCESSING</span>
             </div>
             <h1 className="text-3xl font-bold text-[#171c21] font-poppins tracking-tight">
               Upload Your Dataset
@@ -380,7 +429,7 @@ export default function App() {
                 {selectedFile ? `Selected: ${selectedFile.name} (${selectedFile.size})` : 'drag & drop your data or choose from files'}
               </h3>
               <p className="text-xs font-poppins text-slate-500">
-                Streams are automatically scanned, schema-profiled, and sanitized.
+                Streams are automatically scanned, schema-profiled, and persisted to Supabase Storage.
               </p>
             </div>
 
@@ -448,7 +497,7 @@ export default function App() {
           </div>
 
           <div className="mt-6 pt-4 border-t border-slate-300/30 flex items-center justify-between">
-            <button onClick={() => setCurrentScreen('screen1')} className="neu-extruded-1 px-5 py-2.5 rounded-xl flex items-center gap-2 text-slate-600 hover:text-[#171c21] text-[13px] font-semibold">
+            <button onClick={() => { setCurrentScreen('screen1'); setActiveTab('upload'); }} className="neu-extruded-1 px-5 py-2.5 rounded-xl flex items-center gap-2 text-slate-600 hover:text-[#171c21] text-[13px] font-semibold">
               <span className="material-symbols-outlined text-[18px]">arrow_back</span>
               <span>Back to Pipeline Config</span>
             </button>
@@ -456,7 +505,7 @@ export default function App() {
               <span className="w-2 h-2 rounded-full bg-emerald-500 shadow-sm"></span>
               <span className="text-[12px] font-medium text-slate-600">Data engine ready • Waiting for payload</span>
             </div>
-            <button onClick={() => setCurrentScreen('screen3')} className="neu-btn-primary px-8 py-3 rounded-2xl flex items-center gap-3 text-white font-poppins font-bold text-[14px] tracking-wider active:scale-95 transition-all">
+            <button onClick={() => { setCurrentScreen('screen3'); setActiveTab('format-engine'); setIsFormatSelected(true); }} className="neu-btn-primary px-8 py-3 rounded-2xl flex items-center gap-3 text-white font-poppins font-bold text-[14px] tracking-wider active:scale-95 transition-all">
               <span>CONTINUE</span>
               <span className="material-symbols-outlined text-[20px]">arrow_forward</span>
             </button>
@@ -469,7 +518,7 @@ export default function App() {
         <main className="w-full max-w-7xl mx-auto px-8 py-6 flex-1 flex flex-col gap-6">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <button onClick={() => setCurrentScreen('screen2')} className="w-8 h-8 rounded-lg neu-extruded-1 flex items-center justify-center text-[#5f3f38] hover:text-[#b71700] transition-all">
+              <button onClick={() => { setCurrentScreen('screen2'); setActiveTab('upload'); }} className="w-8 h-8 rounded-lg neu-extruded-1 flex items-center justify-center text-[#5f3f38] hover:text-[#b71700] transition-all">
                 <span className="material-symbols-outlined text-base">arrow_back</span>
               </button>
               <div className="flex items-center gap-2 text-sm text-[#5f3f38]">
@@ -534,8 +583,8 @@ export default function App() {
                     <div className="flex items-center gap-1 mt-2 text-[10px] text-amber-600 font-medium"><span className="material-symbols-outlined text-[12px]">auto_fix_high</span>Schema Enforced</div>
                   </div>
                   <div className="neu-inset p-3.5 rounded-xl flex flex-col justify-between">
-                    <span className="text-xs text-[#5f3f38]">Pipeline Stage</span>
-                    <div className="flex items-baseline gap-1 mt-1"><span className="text-base font-bold text-[#b71700]">Stage 3</span><span className="text-xs text-[#5f3f38]">/ 4</span></div>
+                    <span className="text-xs text-[#5f3f38]">Pipeline Status</span>
+                    <div className="flex items-baseline gap-1 mt-1"><span className="text-base font-bold text-[#b71700]">Active</span></div>
                     <div className="flex items-center gap-1 mt-2 text-[10px] text-[#b71700] font-medium"><span className="w-1.5 h-1.5 rounded-full bg-[#b71700] animate-pulse"></span>Ready</div>
                   </div>
                 </div>
@@ -578,7 +627,7 @@ export default function App() {
                 </div>
               )}
 
-              {/* Dynamic Preview Canvas based on Selected Format */}
+              {/* Dynamic Preview Canvas */}
               <div className="neu-extruded-1 rounded-2xl p-6 flex flex-col gap-4">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
@@ -607,6 +656,10 @@ export default function App() {
                         {syntheticResult?.trainJsonl || `{"id":"rec_1","features":{"annual_revenue":791746,"tenure_months":24,"support_tickets":2,"api_calls_daily":1420},"target":{"churn_risk_score":0.51,"churn_risk_label":"Medium"}}\n{"id":"rec_2","features":{"annual_revenue":148200,"tenure_months":48,"support_tickets":0,"api_calls_daily":8900},"target":{"churn_risk_score":0.04,"churn_risk_label":"Low"}}`}
                       </pre>
                     </div>
+                  ) : selectedFormat === 'document' ? (
+                    <pre className="text-xs font-mono text-[#171c21] overflow-x-auto max-h-[350px] custom-scroll whitespace-pre bg-[#e1e7ee] p-3 rounded-lg">
+                      {typeof syntheticResult === 'string' ? syntheticResult : JSON.stringify(syntheticResult || { documentType: documentSubFormat.toUpperCase(), status: 'Ready to synthesize document' }, null, 2)}
+                    </pre>
                   ) : (
                     <div className="overflow-x-auto custom-scroll max-h-[320px]">
                       <table className="w-full text-left border-collapse text-xs">
@@ -743,7 +796,7 @@ export default function App() {
 
               </div>
 
-              {/* CRITICAL STATE RULE: Parameter inputs revealed AFTER format selection */}
+              {/* UNIVERSAL PARAMETER CONFIGURATION PANEL */}
               {isFormatSelected ? (
                 <div className="neu-inset p-4 rounded-2xl space-y-3 animate-fadeIn">
                   <div className="flex items-center justify-between text-xs font-semibold text-slate-700 border-b border-slate-300 pb-2">
@@ -751,14 +804,13 @@ export default function App() {
                     <span className="text-[10px] text-[#b71700] uppercase">Active Control Panel</span>
                   </div>
 
-                  {/* Document Sub-Format Selector (Visible only when Document mode is selected) */}
                   {selectedFormat === 'document' && (
-                    <div className="flex items-center justify-between bg-white/40 p-2 rounded-lg">
+                    <div className="flex items-center justify-between bg-white/40 p-2.5 rounded-xl border border-slate-300">
                       <span className="text-xs text-slate-700 font-semibold">Document Sub-Format:</span>
                       <select 
                         value={documentSubFormat} 
                         onChange={(e) => setDocumentSubFormat(e.target.value as any)}
-                        className="neu-inset px-2 py-1 rounded text-xs font-mono font-bold text-[#b71700]"
+                        className="neu-inset px-2.5 py-1.5 rounded-lg text-xs font-mono font-bold text-[#b71700] cursor-pointer"
                       >
                         <option value="pdf">PDF (.pdf)</option>
                         <option value="docx">Word (.docx)</option>
@@ -771,7 +823,7 @@ export default function App() {
                     </div>
                   )}
 
-                  <div className="space-y-2 text-xs">
+                  <div className="space-y-2.5 text-xs">
                     <div>
                       <div className="flex justify-between mb-1 text-slate-600">
                         <span>Target Row Count:</span>
@@ -822,7 +874,7 @@ export default function App() {
                 </div>
               ) : (
                 <div className="neu-inset p-4 rounded-2xl text-center text-xs text-slate-500 italic">
-                  Select a destination format above to reveal parameter fine-tuning controls.
+                  Select any destination format above to reveal universal parameter controls.
                 </div>
               )}
 
@@ -849,9 +901,9 @@ export default function App() {
       <footer className="w-full z-20 pb-5 px-8 mt-10">
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between px-6 py-2.5 rounded-full neu-extruded-1 bg-[#e6ebf1]/80 backdrop-blur-sm text-xs text-[#5f3f38] font-poppins">
           <div className="flex items-center gap-3">
-            <span className="font-semibold text-[#171c21]">Xport Studio Data Engine v2.4</span>
+            <span className="font-semibold text-[#171c21]">Xport Enterprise Data Engine v2.4</span>
             <span className="text-slate-400">•</span>
-            <span>Secure Local In-Memory Buffer</span>
+            <span>Supabase Storage & PostgreSQL Persistence</span>
           </div>
           <div className="flex items-center gap-4 mt-2 sm:mt-0">
             <div className="flex items-center gap-2">

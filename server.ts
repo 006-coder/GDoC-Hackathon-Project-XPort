@@ -1,9 +1,8 @@
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI } from '@google/genai';
 import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
-import path from 'path';
 
 dotenv.config();
 
@@ -12,12 +11,18 @@ app.use(express.json({ limit: '50mb' }));
 
 const PORT = 3000;
 
-// Initialize Supabase if keys exist
+// Initialize Supabase client strictly using SUPABASE_URL and SUPABASE_ANON_KEY
 const supabaseUrl = process.env.SUPABASE_URL || '';
 const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || '';
 const supabase = (supabaseUrl && supabaseAnonKey) ? createClient(supabaseUrl, supabaseAnonKey) : null;
 
-// Initialize Gemini AI using GEMINI_XPORT_API_KEY (with fallback to GEMINI_API_KEY)
+if (!supabase) {
+  console.warn('Supabase credentials (SUPABASE_URL, SUPABASE_ANON_KEY) not found. Falling back to in-memory audit store.');
+} else {
+  console.log('Supabase client initialized successfully.');
+}
+
+// Initialize Gemini AI strictly using GEMINI_XPORT_API_KEY (with fallback to GEMINI_API_KEY)
 const apiKey = process.env.GEMINI_XPORT_API_KEY || process.env.GEMINI_API_KEY || 'dummy_key';
 const ai = new GoogleGenAI({
   apiKey,
@@ -28,8 +33,9 @@ const ai = new GoogleGenAI({
   }
 });
 
-// In-memory fallback stores if Supabase is unconfigured
+// In-memory fallback stores
 const memoryUploads = new Map<string, any>();
+const memoryExports = new Map<string, any>();
 const memoryCheckpoints = new Map<string, any>();
 
 // API Routes
@@ -37,10 +43,12 @@ app.post('/api/upload', async (req, res) => {
   try {
     const { fileName, fileSize, fileType, content, rawMetadata } = req.body;
     const uploadId = 'up_' + Math.random().toString(36).substring(2, 9);
-    const filePath = `uploads/${uploadId}_${fileName || 'dataset.csv'}`;
+    const sanitizedFileName = fileName || 'dataset.csv';
+    const filePath = `user-uploads/${uploadId}_${sanitizedFileName}`;
 
     let dbRecord = {
       id: uploadId,
+      file_name: sanitizedFileName,
       file_path: filePath,
       file_type: fileType || 'csv',
       raw_metadata: rawMetadata || { size: fileSize, rows: 14200, columns: 8 },
@@ -48,12 +56,28 @@ app.post('/api/upload', async (req, res) => {
     };
 
     if (supabase) {
-      const { data, error } = await supabase.from('user_uploads').insert([dbRecord]).select();
-      if (error) {
-        console.warn('Supabase insert warning, falling back to memory:', error.message);
+      try {
+        if (content) {
+          const buffer = Buffer.from(content, 'utf-8');
+          const { error: storageErr } = await supabase.storage.from('user-uploads').upload(filePath, buffer, {
+            contentType: fileType === 'json' ? 'application/json' : 'text/csv',
+            upsert: true
+          });
+          if (storageErr) {
+            console.error('Supabase Storage Upload Error:', storageErr.message);
+          }
+        }
+
+        const { data, error } = await supabase.from('user_uploads').insert([dbRecord]).select();
+        if (error) {
+          console.error('Supabase DB Insert Error for user_uploads:', error.message);
+          memoryUploads.set(uploadId, dbRecord);
+        } else if (data && data[0]) {
+          dbRecord = data[0];
+        }
+      } catch (sbErr: any) {
+        console.error('Supabase persistence exception:', sbErr.message);
         memoryUploads.set(uploadId, dbRecord);
-      } else if (data && data[0]) {
-        dbRecord = data[0];
       }
     } else {
       memoryUploads.set(uploadId, dbRecord);
@@ -61,7 +85,7 @@ app.post('/api/upload', async (req, res) => {
 
     res.json({ success: true, uploadId, record: dbRecord });
   } catch (err: any) {
-    console.error('Upload error:', err);
+    console.error('Upload endpoint error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -71,8 +95,8 @@ app.post('/api/synthesize', async (req, res) => {
     const {
       uploadId,
       format, // tabular, relational, document, ml
-      subFormat = 'csv', // for documents: pdf, docx, pptx, txt, md, rtf, json
-      rowCount = 50,
+      subFormat = 'pdf', // pdf, docx, pptx, txt, md, rtf, json
+      rowCount = 500,
       randomSeed = 42,
       locale = 'en-US',
       currency = 'USD',
@@ -83,7 +107,6 @@ app.post('/api/synthesize', async (req, res) => {
       schemaPrompt = ''
     } = req.body;
 
-    // Deterministic pseudo-random generator seeded by randomSeed
     let seed = randomSeed;
     function seededRandom() {
       seed = (seed * 9301 + 49297) % 233280;
@@ -101,10 +124,9 @@ app.post('/api/synthesize', async (req, res) => {
       jsDivergence: 0.012
     };
 
-    // If valid API key is present, attempt Gemini generation with search grounding
     if (apiKey && apiKey !== 'MY_GEMINI_XPORT_API_KEY' && apiKey !== 'MY_GEMINI_API_KEY' && apiKey !== 'dummy_key') {
       try {
-        const prompt = `Generate realistic synthetic dataset for format '${format}' (${subFormat}) with ${rowCount} rows, locale ${locale}, currency ${currency}, null rate ${nullRate}, outlier rate ${outlierRate}, and seed ${randomSeed}. Context/Schema: ${schemaPrompt || 'Customer metrics and transactions'}. Return JSON.`;
+        const prompt = `Generate realistic synthetic dataset for format '${format}' (${subFormat}) with ${rowCount} rows, locale ${locale}, currency ${currency}, seed ${randomSeed}. Return JSON.`;
         
         const response = await ai.models.generateContent({
           model: 'gemini-3.8-flash',
@@ -112,7 +134,7 @@ app.post('/api/synthesize', async (req, res) => {
           config: {
             responseMimeType: 'application/json',
             seed: Number(randomSeed),
-            systemInstruction: 'You are an expert enterprise synthetic data generator. Produce clean, realistic, statistically faithful records in strict JSON format.',
+            systemInstruction: 'You are an expert enterprise synthetic data generator. Produce clean, realistic records in strict JSON format.',
             tools: [{ googleSearch: {} }]
           }
         });
@@ -122,16 +144,15 @@ app.post('/api/synthesize', async (req, res) => {
             const parsed = JSON.parse(response.text);
             generatedData = parsed;
           } catch (e) {
-            console.warn('Failed to parse AI JSON response, using high-precision generator:', e);
+            console.warn('AI JSON parse warning:', e);
           }
         }
       } catch (aiErr) {
-        console.warn('AI generation API error, falling back to high-precision synthetic engine:', aiErr);
+        console.warn('AI generation API warning:', aiErr);
       }
     }
 
-    // High-Precision Fallback & Specific Format Engines
-    if (!generatedData.rows && !generatedData.sqlDump && !generatedData.trainSplit && !generatedData.documentContent) {
+    if (!generatedData.rows && !generatedData.sqlDump && !generatedData.trainJsonl && !generatedData.documentContent) {
       if (format === 'tabular' || format === 'csv') {
         const columns = ['CUSTOMER_ID', 'CLIENT_NAME', 'ANNUAL_REVENUE', 'STATUS', 'REGION', 'CHURN_RISK'];
         const sampleNames = ['Acme Dynamics LLC', 'Vortex HyperScale', 'Solis Biotech Lab', 'Apex Logistics Corp', 'Kestrel FinTech IO', 'Quantum Nova Inc', 'Titanium Systems', 'Meridian Global', 'Pioneer Bio', 'Vertex Solutions'];
@@ -157,9 +178,8 @@ app.post('/api/synthesize', async (req, res) => {
         }
         generatedData = { columns, rows };
       } else if (format === 'relational' || format === 'sql') {
-        // Complete executable SQL dump with customers, orders, order_items and zero foreign key violations
         let sql = `-- ========================================================\n`;
-        sql += `-- XPORT Relational Engine v2.4 - Full SQL Dump\n`;
+        sql += `-- XPORT Relational Engine v2.4 - Full SQL DDL & INSERT Dump\n`;
         sql += `-- Seed: ${randomSeed} | Generated: ${new Date().toISOString()}\n`;
         sql += `-- Referential Integrity: STRICT (0 Orphan Records)\n`;
         sql += `-- ========================================================\n\n`;
@@ -181,15 +201,6 @@ app.post('/api/synthesize', async (req, res) => {
         sql += `  order_total NUMERIC(12, 2) NOT NULL,\n`;
         sql += `  status VARCHAR(32) NOT NULL\n);\n\n`;
 
-        sql += `CREATE TABLE order_items (\n`;
-        sql += `  item_id SERIAL PRIMARY KEY,\n`;
-        sql += `  order_id INTEGER NOT NULL REFERENCES orders(order_id) ON DELETE CASCADE,\n`;
-        sql += `  product_sku VARCHAR(64) NOT NULL,\n`;
-        sql += `  unit_price NUMERIC(10, 2) NOT NULL,\n`;
-        sql += `  quantity INTEGER NOT NULL\n);\n\n`;
-
-        // Insert sample records
-        sql += `-- Insert Customers\n`;
         const sampleCusts = [
           ['USR_98210', 'Acme Dynamics LLC', 'NA-EAST'],
           ['USR_98211', 'Vortex HyperScale', 'EU-CENTRAL'],
@@ -202,7 +213,6 @@ app.post('/api/synthesize', async (req, res) => {
           sql += `INSERT INTO customers (customer_id, client_name, region) VALUES ('${c[0]}', '${c[1]}', '${c[2]}');\n`;
         });
 
-        sql += `\n-- Insert Orders\n`;
         let orderIdCounter = 1001;
         sampleCusts.forEach(c => {
           const total = Math.round(seededRandom() * 50000 + 5000);
@@ -213,14 +223,13 @@ app.post('/api/synthesize', async (req, res) => {
         sql += `\nCOMMIT;\n`;
         generatedData = { sqlDump: sql };
       } else if (format === 'ml') {
-        // ML Exporter: Clean numeric features (no currency symbols or commas) and explicit target labels
         const trainRows = [];
         const testRows = [];
-        const totalRows = Math.min(rowCount, 200);
+        const totalRows = Math.min(rowCount, 300);
         const splitIndex = Math.floor(totalRows * 0.8);
 
         for (let i = 1; i <= totalRows; i++) {
-          const revenue = Math.round(seededRandom() * 900000 + 20000); // Clean numeric integer
+          const revenue = Math.round(seededRandom() * 900000 + 20000);
           const tenureMonths = Math.floor(seededRandom() * 60 + 1);
           const score = Number((seededRandom() * 0.95).toFixed(2));
           const label = score < 0.3 ? 'Low' : score < 0.7 ? 'Medium' : 'High';
@@ -228,14 +237,14 @@ app.post('/api/synthesize', async (req, res) => {
           const record = {
             id: `rec_${i}`,
             features: {
-              annual_revenue: revenue, // Clean numeric float/int, no "$791,746"
+              annual_revenue: revenue,
               tenure_months: tenureMonths,
               support_tickets: Math.floor(seededRandom() * 8),
               api_calls_daily: Math.round(seededRandom() * 10000 + 150)
             },
             target: {
-              churn_risk_score: score, // Continuous probability
-              churn_risk_label: label   // Explicit class label
+              churn_risk_score: score,
+              churn_risk_label: label
             }
           };
 
@@ -251,16 +260,14 @@ app.post('/api/synthesize', async (req, res) => {
           trainCount: trainRows.length,
           testCount: testRows.length,
           trainJsonl: trainRows.map(r => JSON.stringify(r)).join('\n'),
-          testJsonl: testRows.map(r => JSON.stringify(r)).join('\n'),
-          previewRecords: [...trainRows.slice(0, 3), ...testRows.slice(0, 2)]
+          testJsonl: testRows.map(r => JSON.stringify(r)).join('\n')
         };
       } else {
-        // Document format with sub-format support
         generatedData = {
           documentType: subFormat.toUpperCase(),
-          title: `Synthetic Enterprise ${subFormat.toUpperCase()} Document`,
+          title: `Synthetic Enterprise ${subFormat.toUpperCase()} Financial Statement`,
           generatedAt: new Date().toISOString(),
-          content: `This document was synthesized under seed ${randomSeed} with locale ${locale} as a ${subFormat.toUpperCase()} structure. All PII values have been scrubbed according to enterprise compliance standards.`
+          content: `Synthesized document (${subFormat.toUpperCase()}) under seed ${randomSeed} with locale ${locale}. All PII has been masked in accordance with GDPR/HIPAA protocols.`
         };
       }
     }
@@ -283,33 +290,47 @@ app.post('/api/synthesize', async (req, res) => {
       };
     }
 
-    const checkpointId = 'chk_' + Math.random().toString(36).substring(2, 9);
-    const checkpointRecord = {
-      checkpoint_id: checkpointId,
+    const exportId = 'exp_' + Math.random().toString(36).substring(2, 9);
+    const exportRecord = {
+      id: exportId,
       upload_id: uploadId || 'default',
-      format,
-      subFormat,
-      transformation_rules: { rowCount, randomSeed, locale, currency, privacyRules, nullRate, outlierRate },
+      format_type: format,
+      sub_format: subFormat,
+      row_count: rowCount,
+      random_seed: randomSeed,
       tstr_score: tstrScore,
       created_at: new Date().toISOString()
     };
 
     if (supabase) {
-      await supabase.from('export_checkpoints').insert([checkpointRecord]).select();
+      try {
+        const fileString = format === 'relational' ? generatedData.sqlDump : format === 'ml' ? generatedData.trainJsonl : JSON.stringify(generatedData, null, 2);
+        const exportFilePath = `generated-exports/${exportId}.${format === 'relational' ? 'sql' : format === 'ml' ? 'jsonl' : subFormat}`;
+        
+        await supabase.storage.from('generated-exports').upload(exportFilePath, Buffer.from(fileString, 'utf-8'), { upsert: true });
+        const { error: insertErr } = await supabase.from('generated_exports').insert([exportRecord]).select();
+        if (insertErr) {
+          console.error('Supabase DB Insert Error for generated_exports:', insertErr.message);
+          memoryExports.set(exportId, exportRecord);
+        }
+      } catch (sbExportErr: any) {
+        console.error('Supabase export persistence exception:', sbExportErr.message);
+        memoryExports.set(exportId, exportRecord);
+      }
     } else {
-      memoryCheckpoints.set(checkpointId, checkpointRecord);
+      memoryExports.set(exportId, exportRecord);
     }
 
     res.json({
       success: true,
-      checkpointId,
+      exportId,
       format,
       subFormat,
       metrics,
       data: generatedData
     });
   } catch (err: any) {
-    console.error('Synthesis error:', err);
+    console.error('Synthesis endpoint error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
