@@ -12,14 +12,15 @@
 - **Zero "Fake Data Oasis" Pitfalls:** Generates statistically aligned, privacy-safe synthetic data with guaranteed relational integrity.
 - **Infinite Variation Engine:** Tweak row counts, random seeds, and locales to generate endless, non-repeating dataset variations.
 - **TSTR Quality Evaluation:** Built-in Train Synthetic, Test Real (TSTR) pipeline calculating Jensen-Shannon divergence, Kolmogorov-Smirnov test, and correlation matrix alignment with a 1.0–5.0 Synthetic Utility Score.
+- **Multi-Key API Sanitization & Rotation Engine:** Automatic 429/401 rate limit detection and comma-separated key rotation across Gemini API keys.
 
 ---
 
 ## 🚀 System Architecture & Tech Stack
-- **Frontend / UI:** React, Tailwind CSS (Neumorphic design system), Lucide icons.
-- **Backend / API:** Node.js, Express, Vite middleware.
+- **Frontend / UI:** React, Tailwind CSS (Neumorphic design system with Light, Cyber Emerald, and Sunset Gradient themes).
+- **Backend / API:** Node.js, Express, Vite middleware, Multi-Key Rotation.
 - **Database & Persistence:** Supabase (PostgreSQL DB + Storage buckets).
-- **Intelligence Layer:** Google AI Studio SDK (`@google/genai`, model `gemini-3.8-flash`) with structured JSON outputs and 429 quota fallback.
+- **Intelligence Layer:** Google AI Studio SDK (`@google/genai`, model `gemini-3.8-flash`) with structured JSON outputs and robust fallback mechanisms.
 
 ---
 
@@ -97,7 +98,7 @@ ON CONFLICT (id) DO NOTHING;
 2. **Configure Environment Variables:**
    Create a `.env` file in the root directory:
    ```env
-   GEMINI_XPORT_API_KEY="your_gemini_api_key"
+   GEMINI_XPORT_API_KEYS="key1,key2,key3"
    SUPABASE_URL="your_supabase_url"
    SUPABASE_ANON_KEY="your_supabase_anon_key"
    ```
