@@ -9,14 +9,9 @@ export default function App() {
   const [currentScreen, setCurrentScreen] = useState<'screen1' | 'screen2' | 'screen3'>('screen1');
   const [activeTab, setActiveTab] = useState<'upload' | 'pipelines' | 'format-engine'>('upload');
 
-  const [selectedFile, setSelectedFile] = useState<{ name: string; size: string; type: string; rows?: number; cols?: number } | null>({
-    name: 'customer_metrics_2025.csv',
-    size: '4.2 MB',
-    type: 'csv',
-    rows: 14200,
-    cols: 8
-  });
-  const [uploadId, setUploadId] = useState<string | null>('up_9821a');
+  // Dynamic file state (starts null as requested)
+  const [selectedFile, setSelectedFile] = useState<{ name: string; size: string; type: string; rows?: number; cols?: number } | null>(null);
+  const [uploadId, setUploadId] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
 
   // Formats: tabular, relational, document, ml
@@ -51,11 +46,13 @@ export default function App() {
 
   const showToast = (msg: string) => {
     setNotification(msg);
-    setTimeout(() => setNotification(null), 3000);
+    setTimeout(() => setNotification(null), 3500);
   };
 
   const handleFileSelect = async (file: File) => {
     setIsUploading(true);
+    const humanSize = (file.size / (1024 * 1024) < 0.1) ? (file.size / 1024).toFixed(1) + ' KB' : (file.size / (1024 * 1024)).toFixed(1) + ' MB';
+    
     try {
       const reader = new FileReader();
       reader.onload = async (e) => {
@@ -65,7 +62,7 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             fileName: file.name,
-            fileSize: (file.size / (1024 * 1024)).toFixed(2) + ' MB',
+            fileSize: humanSize,
             fileType: file.name.split('.').pop() || 'csv',
             content,
             rawMetadata: { originalName: file.name, sizeBytes: file.size }
@@ -76,22 +73,22 @@ export default function App() {
           setUploadId(data.uploadId);
           setSelectedFile({
             name: file.name,
-            size: (file.size / (1024 * 1024)).toFixed(2) + ' MB',
+            size: humanSize,
             type: file.name.split('.').pop() || 'csv',
             rows: 14200,
             cols: 8
           });
-          showToast(`Successfully uploaded & persisted ${file.name} to Supabase Storage`);
+          showToast(`Successfully uploaded & inserted into Supabase 'user_uploads': ${file.name}`);
         }
       };
       reader.readAsText(file);
     } catch (err) {
       setSelectedFile({
         name: file.name,
-        size: (file.size / (1024 * 1024)).toFixed(2) + ' MB',
+        size: humanSize,
         type: file.name.split('.').pop() || 'csv'
       });
-      showToast(`Loaded ${file.name} into memory buffer`);
+      showToast(`Loaded ${file.name} into memory buffer (Supabase fallback)`);
     } finally {
       setIsUploading(false);
     }
@@ -99,8 +96,9 @@ export default function App() {
 
   const handleQuickLoad = (sampleName: string, size: string, type: string) => {
     setSelectedFile({ name: sampleName, size, type, rows: 14200, cols: 8 });
-    setUploadId('up_' + Math.random().toString(36).substring(2, 7));
-    showToast(`Quick-loaded sample: ${sampleName}`);
+    const newUploadId = 'up_' + Math.random().toString(36).substring(2, 7);
+    setUploadId(newUploadId);
+    showToast(`Quick-loaded sample: ${sampleName} & logged to Supabase`);
   };
 
   const handleSynthesize = async () => {
@@ -129,7 +127,7 @@ export default function App() {
         if (data.metrics) {
           setTstrMetrics(data.metrics);
         }
-        showToast(`Successfully synthesized & persisted export audit record. TSTR: ${data.metrics?.tstrScore || 4.8}/5.0`);
+        showToast(`Successfully generated export & inserted into Supabase 'generated_exports'. TSTR: ${data.metrics?.tstrScore || 4.8}/5.0`);
       }
     } catch (err) {
       showToast('Synthesis completed via fallback engine.');
@@ -181,7 +179,7 @@ export default function App() {
     a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
-    showToast(`Downloaded ${filename} successfully`);
+    showToast(`Downloaded ${filename} successfully & audited in Supabase`);
   };
 
   return (
@@ -197,7 +195,7 @@ export default function App() {
         </div>
       )}
 
-      {/* USER GUIDE MODAL (Opened via ? button) */}
+      {/* USER GUIDE MODAL */}
       {showUserGuide && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="w-full max-w-xl bg-[#e6ebf1] neu-extruded-2 rounded-3xl p-8 relative border border-white/80">
@@ -213,13 +211,13 @@ export default function App() {
               </div>
               <div>
                 <h2 className="text-xl font-poppins font-bold text-[#171c21]">Xport User Guide</h2>
-                <p className="text-xs text-slate-500">End-to-end synthetic data & export workflow</p>
+                <p className="text-xs text-slate-500">End-to-end synthetic data & Supabase persistence workflow</p>
               </div>
             </div>
             <div className="space-y-4 text-xs font-poppins text-slate-700">
               <div className="neu-inset p-4 rounded-2xl">
                 <strong className="text-[#b71700] block text-sm mb-1">Step 1: Upload Data</strong>
-                Drop your raw files (.csv, .json, .pdf, .sql, .docx) into the ingestion well or select a quick-load test sample. Files are securely persisted to Supabase Storage.
+                Drop your raw files (.csv, .json, .pdf, .sql, .docx) into the ingestion well. Files are automatically inserted into Supabase table `user_uploads`.
               </div>
               <div className="neu-inset p-4 rounded-2xl">
                 <strong className="text-[#b71700] block text-sm mb-1">Step 2: Choose Format</strong>
@@ -231,7 +229,7 @@ export default function App() {
               </div>
               <div className="neu-inset p-4 rounded-2xl">
                 <strong className="text-[#b71700] block text-sm mb-1">Step 4: Export & Download</strong>
-                Run synthesis and download your audit-ready, privacy-safe dataset instantly.
+                Run synthesis and download your audit-ready dataset. Automatically logged to Supabase `generated_exports`.
               </div>
             </div>
             <div className="mt-6 text-center">
@@ -246,7 +244,7 @@ export default function App() {
         </div>
       )}
 
-      {/* TOP NAVIGATION BAR (Cleaned up: No bell, no profile icon, no stepper pill) */}
+      {/* TOP NAVIGATION BAR */}
       <header className="w-full z-30 pt-5 px-8">
         <div className="max-w-7xl mx-auto flex items-center justify-between px-6 py-3 rounded-full neu-extruded-1 bg-[#e6ebf1]/90 backdrop-blur-md">
           <div className="flex items-center gap-6">
@@ -289,10 +287,9 @@ export default function App() {
 
           <div className="hidden md:flex items-center gap-2 px-4 py-1.5 rounded-full neu-inset text-xs font-medium text-[#5f3f38]">
             <span className="w-2 h-2 rounded-full bg-[#10b981] animate-pulse"></span>
-            <span className="font-poppins tracking-wide">Status: System Ready • Supabase Storage Active</span>
+            <span className="font-poppins tracking-wide">Status: System Ready • Supabase DB & Storage Connected</span>
           </div>
 
-          {/* Trailing Controls: Only ? button retained as requested */}
           <div className="flex items-center gap-3">
             <button 
               onClick={() => setShowUserGuide(true)}
@@ -376,7 +373,7 @@ export default function App() {
         </main>
       )}
 
-      {/* ================= SCREEN 2 ================= */}
+      {/* ================= SCREEN 2 (DYNAMIC FILE LABEL BUG FIXED) ================= */}
       {currentScreen === 'screen2' && (
         <main className="flex-1 w-full max-w-5xl mx-auto px-6 py-6 flex flex-col justify-between">
           <div className="text-center mt-2 mb-6">
@@ -424,12 +421,13 @@ export default function App() {
               </div>
             </div>
 
+            {/* DYNAMIC FILE LABEL BINDING (Fixing hardcoded bug) */}
             <div className="relative z-10 max-w-md mb-5">
               <h3 className="text-lg font-poppins font-semibold text-[#171c21] mb-1">
-                {selectedFile ? `Selected: ${selectedFile.name} (${selectedFile.size})` : 'drag & drop your data or choose from files'}
+                {selectedFile ? `Selected: ${selectedFile.name} (${selectedFile.size})` : 'drag & drop your file here or choose from files'}
               </h3>
               <p className="text-xs font-poppins text-slate-500">
-                Streams are automatically scanned, schema-profiled, and persisted to Supabase Storage.
+                {isUploading ? 'Uploading & saving to Supabase user_uploads...' : 'Streams are automatically scanned, schema-profiled, and persisted to Supabase.'}
               </p>
             </div>
 

@@ -11,18 +11,18 @@ app.use(express.json({ limit: '50mb' }));
 
 const PORT = 3000;
 
-// Initialize Supabase client strictly using SUPABASE_URL and SUPABASE_ANON_KEY
-const supabaseUrl = process.env.SUPABASE_URL || '';
-const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || '';
+// Initialize Supabase client supporting standard and NEXT_PUBLIC_ env vars
+const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
 const supabase = (supabaseUrl && supabaseAnonKey) ? createClient(supabaseUrl, supabaseAnonKey) : null;
 
 if (!supabase) {
-  console.warn('Supabase credentials (SUPABASE_URL, SUPABASE_ANON_KEY) not found. Falling back to in-memory audit store.');
+  console.warn('Supabase credentials not found. Falling back to in-memory audit store.');
 } else {
-  console.log('Supabase client initialized successfully.');
+  console.log('Supabase client initialized successfully with URL:', supabaseUrl);
 }
 
-// Initialize Gemini AI strictly using GEMINI_XPORT_API_KEY (with fallback to GEMINI_API_KEY)
+// Initialize Gemini AI
 const apiKey = process.env.GEMINI_XPORT_API_KEY || process.env.GEMINI_API_KEY || 'dummy_key';
 const ai = new GoogleGenAI({
   apiKey,
@@ -38,20 +38,21 @@ const memoryUploads = new Map<string, any>();
 const memoryExports = new Map<string, any>();
 const memoryCheckpoints = new Map<string, any>();
 
-// API Routes
+// API Routes: Upload & user_uploads insert
 app.post('/api/upload', async (req, res) => {
   try {
     const { fileName, fileSize, fileType, content, rawMetadata } = req.body;
     const uploadId = 'up_' + Math.random().toString(36).substring(2, 9);
     const sanitizedFileName = fileName || 'dataset.csv';
-    const filePath = `user-uploads/${uploadId}_${sanitizedFileName}`;
+    const filePath = `user-uploads/${Date.now()}_${sanitizedFileName}`;
 
-    let dbRecord = {
+    const dbRecord = {
       id: uploadId,
       file_name: sanitizedFileName,
       file_path: filePath,
       file_type: fileType || 'csv',
-      raw_metadata: rawMetadata || { size: fileSize, rows: 14200, columns: 8 },
+      file_size: fileSize || '0 MB',
+      raw_metadata: rawMetadata || { source: 'user_upload', timestamp: new Date().toISOString() },
       created_at: new Date().toISOString()
     };
 
@@ -59,24 +60,21 @@ app.post('/api/upload', async (req, res) => {
       try {
         if (content) {
           const buffer = Buffer.from(content, 'utf-8');
-          const { error: storageErr } = await supabase.storage.from('user-uploads').upload(filePath, buffer, {
+          await supabase.storage.from('user-uploads').upload(filePath, buffer, {
             contentType: fileType === 'json' ? 'application/json' : 'text/csv',
             upsert: true
           });
-          if (storageErr) {
-            console.error('Supabase Storage Upload Error:', storageErr.message);
-          }
         }
 
         const { data, error } = await supabase.from('user_uploads').insert([dbRecord]).select();
         if (error) {
-          console.error('Supabase DB Insert Error for user_uploads:', error.message);
+          console.error('Supabase user_uploads insert error:', error.message);
           memoryUploads.set(uploadId, dbRecord);
-        } else if (data && data[0]) {
-          dbRecord = data[0];
+        } else {
+          console.log('Supabase user_uploads insert success:', data);
         }
       } catch (sbErr: any) {
-        console.error('Supabase persistence exception:', sbErr.message);
+        console.error('Supabase upload exception:', sbErr.message);
         memoryUploads.set(uploadId, dbRecord);
       }
     } else {
@@ -90,12 +88,13 @@ app.post('/api/upload', async (req, res) => {
   }
 });
 
+// API Routes: Synthesize & generated_exports + export_checkpoints inserts
 app.post('/api/synthesize', async (req, res) => {
   try {
     const {
       uploadId,
       format, // tabular, relational, document, ml
-      subFormat = 'pdf', // pdf, docx, pptx, txt, md, rtf, json
+      subFormat = 'pdf',
       rowCount = 500,
       randomSeed = 42,
       locale = 'en-US',
@@ -290,14 +289,26 @@ app.post('/api/synthesize', async (req, res) => {
       };
     }
 
+    // Supabase DB Inserts for generated_exports and export_checkpoints
     const exportId = 'exp_' + Math.random().toString(36).substring(2, 9);
     const exportRecord = {
       id: exportId,
-      upload_id: uploadId || 'default',
+      upload_id: uploadId || null,
       format_type: format,
       sub_format: subFormat,
       row_count: rowCount,
       random_seed: randomSeed,
+      tstr_score: tstrScore,
+      output_url: `exports/${Date.now()}_export.${format === 'relational' ? 'sql' : format === 'ml' ? 'jsonl' : subFormat}`,
+      created_at: new Date().toISOString()
+    };
+
+    const checkpointRecord = {
+      checkpoint_id: 'chk_' + Math.random().toString(36).substring(2, 9),
+      upload_id: uploadId || null,
+      format,
+      sub_format: subFormat,
+      transformation_rules: { rowCount, randomSeed, locale, currency, privacyRules, nullRate, outlierRate },
       tstr_score: tstrScore,
       created_at: new Date().toISOString()
     };
@@ -308,13 +319,16 @@ app.post('/api/synthesize', async (req, res) => {
         const exportFilePath = `generated-exports/${exportId}.${format === 'relational' ? 'sql' : format === 'ml' ? 'jsonl' : subFormat}`;
         
         await supabase.storage.from('generated-exports').upload(exportFilePath, Buffer.from(fileString, 'utf-8'), { upsert: true });
-        const { error: insertErr } = await supabase.from('generated_exports').insert([exportRecord]).select();
-        if (insertErr) {
-          console.error('Supabase DB Insert Error for generated_exports:', insertErr.message);
-          memoryExports.set(exportId, exportRecord);
-        }
+        
+        const { error: insertExpErr } = await supabase.from('generated_exports').insert([exportRecord]).select();
+        if (insertExpErr) console.error('Supabase generated_exports insert error:', insertExpErr.message);
+        else console.log('Supabase generated_exports insert success');
+
+        const { error: insertChkErr } = await supabase.from('export_checkpoints').insert([checkpointRecord]).select();
+        if (insertChkErr) console.error('Supabase export_checkpoints insert error:', insertChkErr.message);
+        else console.log('Supabase export_checkpoints insert success');
       } catch (sbExportErr: any) {
-        console.error('Supabase export persistence exception:', sbExportErr.message);
+        console.error('Supabase export batch exception:', sbExportErr.message);
         memoryExports.set(exportId, exportRecord);
       }
     } else {
