@@ -1,0 +1,7 @@
+{
+  "name": "Xport - AI Synthetic Data Generation Platform",
+  "description": "Export your data into any format — on demand, privacy-safe, AI-synthesized with TSTR quality validation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
