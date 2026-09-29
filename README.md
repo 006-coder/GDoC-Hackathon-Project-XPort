@@ -89,23 +89,9 @@ ON CONFLICT (id) DO NOTHING;
 
 ---
 
-## 🛠️ Local Installation & Development
+## 🛠️ To run it using vercel
 
-1. **Clone Repository & Install Dependencies:**
-   ```bash
-   npm install
-   ```
-2. **Configure Environment Variables:**
-   Create a `.env` file in the root directory:
-   ```env
-   GEMINI_XPORT_API_KEYS="key1,key2,key3"
-   SUPABASE_URL="your_supabase_url"
-   SUPABASE_ANON_KEY="your_supabase_anon_key"
-   ```
-3. **Run Development Server:**
-   ```bash
-   npm run dev
-   ```
+https://g-do-c-hackathon-project-x-port.vercel.app/
 
 ---
 
